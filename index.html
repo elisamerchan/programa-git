@@ -373,7 +373,66 @@
         cursor: pointer;
       }
 
-      /* Toast / calibration banner */
+      /* Sphere map overlay */
+      .sphere-map {
+        position: absolute;
+        inset: 0;
+        z-index: 30;
+        background: rgba(10, 12, 11, 0.92);
+        display: none;
+        align-items: center;
+        justify-content: center;
+        padding: 24px;
+      }
+      .sphere-map.show {
+        display: flex;
+      }
+      .sphere-map-inner {
+        width: 100%;
+        max-width: 480px;
+        display: flex;
+        flex-direction: column;
+        gap: 14px;
+        align-items: center;
+      }
+      .sphere-title {
+        font-size: 14px;
+        font-weight: 600;
+        color: var(--paper);
+        text-align: center;
+      }
+      #sphere-svg {
+        width: 100%;
+        aspect-ratio: 2/1;
+        background: rgba(255, 255, 255, 0.04);
+        border: 1px solid rgba(255, 255, 255, 0.1);
+        border-radius: 12px;
+      }
+      .sphere-legend {
+        display: flex;
+        gap: 16px;
+        font-size: 11px;
+        color: var(--slate);
+        font-family: "JetBrains Mono", monospace;
+      }
+      .sphere-legend .dot {
+        display: inline-block;
+        width: 9px;
+        height: 9px;
+        border-radius: 50%;
+        margin-right: 5px;
+        vertical-align: middle;
+      }
+      .sphere-legend .dot.pending {
+        background: var(--signal);
+      }
+      .sphere-legend .dot.active {
+        background: var(--paper);
+      }
+      .sphere-legend .dot.done {
+        background: var(--ok);
+        opacity: 0.4;
+      }
       .banner {
         position: absolute;
         top: max(60px, calc(env(safe-area-inset-top) + 56px));
@@ -468,7 +527,26 @@
 
         <div class="hud-top">
           <div class="progress-label">FOTO <b id="shot-index">01</b> / 32</div>
+          <div class="icon-btn" id="btn-map" title="Ver mapa esférico">⊞</div>
           <div class="pitch-label" id="pitch-row-label">HORIZONTE</div>
+        </div>
+
+        <!-- Sphere overview: equirectangular grid of all target points -->
+        <div class="sphere-map" id="sphere-map">
+          <div class="sphere-map-inner">
+            <div class="sphere-title">Mapa de la esfera — puntos restantes</div>
+            <svg
+              id="sphere-svg"
+              viewBox="0 0 360 180"
+              preserveAspectRatio="none"
+            ></svg>
+            <div class="sphere-legend">
+              <span><i class="dot pending"></i> Pendiente</span>
+              <span><i class="dot active"></i> Actual</span>
+              <span><i class="dot done"></i> Capturado</span>
+            </div>
+            <button class="btn secondary" id="btn-map-close">Cerrar</button>
+          </div>
         </div>
 
         <div class="banner" id="banner">
@@ -523,21 +601,21 @@
       /* ====================== CONFIG: 32-point capture pattern ====================== */
       const TARGETS = (() => {
         const pts = [];
-        // pitch 0: 12 points every 30°
+        // 1) Horizon ring (pitch 0): full 360°, 12 points every 30°
         for (let i = 0; i < 12; i++)
           pts.push({ yaw: i * 30, pitch: 0, label: "HORIZONTE" });
-        // pitch +45: 8 points every 45°
+        // 2) Upper ring (+45°): 8 points every 45°
         for (let i = 0; i < 8; i++)
           pts.push({ yaw: i * 45, pitch: 45, label: "ARRIBA 45°" });
-        // pitch -45: 8 points every 45°
+        // 3) Zenith (ceiling, +90°): 2 points
+        pts.push({ yaw: 0, pitch: 90, label: "CENIT (TECHO)" });
+        pts.push({ yaw: 180, pitch: 90, label: "CENIT (TECHO)" });
+        // 4) Lower ring (-45°): 8 points every 45°
         for (let i = 0; i < 8; i++)
           pts.push({ yaw: i * 45, pitch: -45, label: "ABAJO 45°" });
-        // pitch +90: 2 points
-        pts.push({ yaw: 0, pitch: 90, label: "CENIT" });
-        pts.push({ yaw: 180, pitch: 90, label: "CENIT" });
-        // pitch -90: 2 points
-        pts.push({ yaw: 0, pitch: -90, label: "NADIR" });
-        pts.push({ yaw: 180, pitch: -90, label: "NADIR" });
+        // 5) Nadir (floor, -90°): 2 points
+        pts.push({ yaw: 0, pitch: -90, label: "NADIR (SUELO)" });
+        pts.push({ yaw: 180, pitch: -90, label: "NADIR (SUELO)" });
         return pts; // total = 32
       })();
 
@@ -682,7 +760,9 @@
           baseAlpha = e.alpha;
           baseBeta = e.beta;
         }
-        let yaw = (e.alpha - baseAlpha + 360) % 360;
+        // alpha increases clockwise (turning right decreases alpha on most devices
+        // relative to the world frame), so invert to make "turn right" -> yaw increases
+        let yaw = (baseAlpha - e.alpha + 360) % 360;
         let pitch = e.beta - baseBeta;
 
         // smoothing (handle wraparound for yaw)
@@ -748,6 +828,44 @@
         arrows.up.classList.toggle("show", outUp);
 
         renderARMarkers(yaw, pitch, aligned);
+      }
+
+      /* ====================== SPHERE OVERVIEW MAP ====================== */
+      const sphereMap = document.getElementById("sphere-map");
+      const sphereSvg = document.getElementById("sphere-svg");
+
+      document.getElementById("btn-map").addEventListener("click", () => {
+        renderSphereMap();
+        sphereMap.classList.add("show");
+      });
+      document.getElementById("btn-map-close").addEventListener("click", () => {
+        sphereMap.classList.remove("show");
+      });
+
+      function renderSphereMap() {
+        // Equirectangular projection: x = yaw (0-360), y = 90 - pitch (0=top, 180=bottom)
+        let svg = "";
+        TARGETS.forEach((pt, i) => {
+          const x = pt.yaw;
+          const y = 90 - pt.pitch;
+          let cls = "pending";
+          if (capturedIndices.has(i)) cls = "done";
+          else if (i === currentIndex) cls = "active";
+
+          const fill =
+            cls === "done"
+              ? "var(--ok)"
+              : cls === "active"
+                ? "var(--paper)"
+                : "var(--signal)";
+          const opacity = cls === "done" ? 0.35 : 1;
+          const r = cls === "active" ? 6 : 4;
+          svg += `<circle cx="${x}" cy="${y}" r="${r}" fill="${fill}" opacity="${opacity}" />`;
+          if (cls === "active") {
+            svg += `<circle cx="${x}" cy="${y}" r="9" fill="none" stroke="${fill}" stroke-width="1" opacity="0.6" />`;
+          }
+        });
+        sphereSvg.innerHTML = svg;
       }
 
       /* ====================== AR MARKER PROJECTION ====================== */
@@ -874,6 +992,7 @@
           currentIndex++;
           updateTargetUI();
           renderARMarkers(smYaw, smPitch, false);
+          if (sphereMap.classList.contains("show")) renderSphereMap();
         } else {
           finishCapture();
         }
