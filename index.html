@@ -8,6 +8,7 @@
     />
     <title>360 MuniTrip Capture</title>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/piexifjs@1.0.6/piexif.min.js"></script>
     <style>
       :root {
         --ink: #1a1d1b;
@@ -629,12 +630,16 @@
 
       /* ====================== STATE ====================== */
       let stream, track, video;
+      let imageCapture = null; // ImageCapture API instance
+      let photoCaps = null; // PhotoCapabilities (ISO, WB, etc.)
+      let trackCaps = null; // track.getCapabilities()
+      let gpsCoords = null; // {lat, lng, alt} from geolocation
       let baseAlpha = null,
         baseBeta = null;
       let smYaw = 0,
         smPitch = 0;
       let currentIndex = 0;
-      let captures = []; // {fileName, yaw, pitch, width, height, timestamp, blob}
+      let captures = [];
       let db;
 
       /* ====================== INDEXEDDB ====================== */
@@ -719,25 +724,108 @@
         if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
           throw new Error("Cámara no soportada en este navegador");
         }
+
+        // Request GPS in parallel (non-blocking — failure is ok)
+        requestGPS();
+
         const constraints = {
           audio: false,
           video: {
             facingMode: "environment",
-            width: { ideal: 4000 },
-            height: { ideal: 3000 },
+            width: { ideal: 4096 },
+            height: { ideal: 3072 },
+            // Ask for max quality from the start
+            advanced: [{ zoom: 1 }],
           },
         };
+
         stream = await navigator.mediaDevices.getUserMedia(constraints);
         track = stream.getVideoTracks()[0];
         video = document.getElementById("video");
         video.srcObject = stream;
         await video.play();
+
+        // --- ImageCapture API ---
+        if (typeof ImageCapture !== "undefined") {
+          imageCapture = new ImageCapture(track);
+          try {
+            photoCaps = await imageCapture.getPhotoCapabilities();
+          } catch (e) {
+            console.warn("getPhotoCapabilities failed:", e);
+          }
+        }
+
+        // --- Track capabilities (foco, exposición, WB) ---
+        trackCaps = track.getCapabilities ? track.getCapabilities() : {};
+
+        // Lock focus to continuous autofocus first, then lock after first frame
+        await applyTrackConstraints();
+      }
+
+      async function applyTrackConstraints() {
+        if (!track || !trackCaps) return;
+        const adv = {};
+        if (trackCaps.focusMode && trackCaps.focusMode.includes("continuous"))
+          adv.focusMode = "continuous";
+        if (
+          trackCaps.exposureMode &&
+          trackCaps.exposureMode.includes("continuous")
+        )
+          adv.exposureMode = "continuous";
+        if (
+          trackCaps.whiteBalanceMode &&
+          trackCaps.whiteBalanceMode.includes("continuous")
+        )
+          adv.whiteBalanceMode = "continuous";
+        if (Object.keys(adv).length) {
+          try {
+            await track.applyConstraints({ advanced: [adv] });
+          } catch (e) {
+            console.warn("applyConstraints failed:", e);
+          }
+        }
+      }
+
+      // Lock focus & exposure just before capture (single shot lock)
+      async function lockCameraForCapture() {
+        if (!track || !trackCaps) return;
+        const adv = {};
+        if (trackCaps.focusMode && trackCaps.focusMode.includes("manual")) {
+          // stay with continuous — manual w/o distance is unreliable
+        }
+        // exposureMode 'manual' without a set value can overexpose; prefer continuous
+        // Just ensure we're stable
+        try {
+          await track.applyConstraints({ advanced: [adv] });
+        } catch (_) {}
+      }
+
+      function requestGPS() {
+        if (!navigator.geolocation) return;
+        navigator.geolocation.getCurrentPosition(
+          (pos) => {
+            gpsCoords = {
+              lat: pos.coords.latitude,
+              lng: pos.coords.longitude,
+              alt: pos.coords.altitude || 0,
+              acc: pos.coords.accuracy,
+            };
+            console.log("GPS obtenido:", gpsCoords);
+          },
+          (err) => console.warn("GPS no disponible:", err),
+          { enableHighAccuracy: true, timeout: 15000 },
+        );
       }
 
       function showCamera() {
         document.getElementById("start").style.display = "none";
         document.getElementById("camview").classList.add("active");
         updateTargetUI();
+        // Show a brief banner with what camera mode was activated
+        const mode = imageCapture
+          ? "ImageCapture API activa ✓"
+          : "Modo canvas (fallback)";
+        showBanner(mode + " — apunta al frente y calibra", 3000);
       }
 
       /* ====================== ORIENTATION ====================== */
@@ -748,9 +836,10 @@
         window.addEventListener("compassneedscalibration", () => {
           if (compassWarned) return;
           compassWarned = true;
-          const b = document.getElementById("banner");
-          b.classList.add("show");
-          setTimeout(() => b.classList.remove("show"), 4000);
+          showBanner(
+            "Calibra la brújula moviendo el teléfono en figura de ocho",
+            5000,
+          );
         });
       }
 
@@ -951,33 +1040,264 @@
         finishCapture();
       });
 
-      async function capturePhoto() {
-        const t = TARGETS[currentIndex];
-        const canvas = document.createElement("canvas");
-        canvas.width = video.videoWidth;
-        canvas.height = video.videoHeight;
-        const ctx = canvas.getContext("2d");
-        ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+      // Flash feedback on shutter
+      function flashShutter() {
+        shutter.style.transform = "scale(0.88)";
+        setTimeout(() => (shutter.style.transform = ""), 150);
+      }
 
-        const blob = await new Promise((res) =>
-          canvas.toBlob(res, "image/jpeg", 0.92),
-        );
-        const fileName = `photo_${String(currentIndex + 1).padStart(2, "0")}_yaw${t.yaw}_pitch${t.pitch}.jpg`;
-        const record = {
-          fileName,
-          yaw: Number(smYaw.toFixed(1)),
-          pitch: Number(smPitch.toFixed(1)),
-          targetYaw: t.yaw,
-          targetPitch: t.pitch,
-          width: canvas.width,
-          height: canvas.height,
-          timestamp: new Date().toISOString(),
-          blob,
-        };
-        await saveCapture(record);
-        capturedIndices.add(currentIndex);
-        addThumb(blob);
-        advanceIndex();
+      async function capturePhoto() {
+        flashShutter();
+        shutter.disabled = true;
+
+        try {
+          const t = TARGETS[currentIndex];
+
+          // Small settle delay so autofocus stabilizes
+          await new Promise((r) => setTimeout(r, 120));
+          await lockCameraForCapture();
+
+          let blob;
+          let width, height;
+          let camMeta = {};
+
+          // --- Preferred: ImageCapture.takePhoto() ---
+          if (imageCapture) {
+            try {
+              // Build photo settings from capabilities
+              const photoSettings = {};
+              if (photoCaps) {
+                if (photoCaps.imageWidth && photoCaps.imageWidth.max)
+                  photoSettings.imageWidth = photoCaps.imageWidth.max;
+                if (photoCaps.imageHeight && photoCaps.imageHeight.max)
+                  photoSettings.imageHeight = photoCaps.imageHeight.max;
+                // Request max quality (fillLightMode: no flash indoors by default)
+                if (
+                  photoCaps.fillLightMode &&
+                  photoCaps.fillLightMode.includes("off")
+                )
+                  photoSettings.fillLightMode = "off";
+              }
+
+              blob = await imageCapture.takePhoto(
+                Object.keys(photoSettings).length ? photoSettings : undefined,
+              );
+
+              // Read actual dimensions from blob
+              const bmp = await createImageBitmap(blob);
+              width = bmp.width;
+              height = bmp.height;
+              bmp.close();
+
+              // Read current track settings as camera metadata
+              const ts = track.getSettings();
+              camMeta = {
+                iso: ts.iso,
+                shutterSpeed: ts.shutterSpeed,
+                aperture: ts.aperture,
+                focalLength: ts.focalLength,
+                focalLengthIn35mm: ts.focalLengthIn35mmFilm,
+                whiteBalance: ts.whiteBalanceMode,
+                zoom: ts.zoom,
+                torch: ts.torch,
+                deviceWidth: ts.width,
+                deviceHeight: ts.height,
+              };
+              // Remove undefined keys
+              Object.keys(camMeta).forEach(
+                (k) => camMeta[k] === undefined && delete camMeta[k],
+              );
+            } catch (imgCapErr) {
+              console.warn(
+                "ImageCapture.takePhoto failed, falling back to canvas:",
+                imgCapErr,
+              );
+              blob = null;
+            }
+          }
+
+          // --- Fallback: canvas (if ImageCapture not available or failed) ---
+          if (!blob) {
+            const canvas = document.createElement("canvas");
+            canvas.width = video.videoWidth;
+            canvas.height = video.videoHeight;
+            canvas.getContext("2d").drawImage(video, 0, 0);
+            blob = await new Promise((r) =>
+              canvas.toBlob(r, "image/jpeg", 0.95),
+            );
+            width = canvas.width;
+            height = canvas.height;
+          }
+
+          // --- Inject / enrich EXIF ---
+          blob = await injectEXIF(blob, {
+            yaw: Number(smYaw.toFixed(2)),
+            pitch: Number(smPitch.toFixed(2)),
+            targetYaw: t.yaw,
+            targetPitch: t.pitch,
+            shotIndex: currentIndex + 1,
+            camMeta,
+          });
+
+          const fileName = `photo_${String(currentIndex + 1).padStart(2, "0")}_yaw${t.yaw}_pitch${t.pitch}.jpg`;
+          const record = {
+            fileName,
+            yaw: Number(smYaw.toFixed(2)),
+            pitch: Number(smPitch.toFixed(2)),
+            targetYaw: t.yaw,
+            targetPitch: t.pitch,
+            width,
+            height,
+            timestamp: new Date().toISOString(),
+            camMeta,
+            gps: gpsCoords,
+            blob,
+          };
+
+          await saveCapture(record);
+          capturedIndices.add(currentIndex);
+          addThumb(blob);
+          advanceIndex();
+        } catch (err) {
+          console.error("Capture error:", err);
+          showBanner("Error al capturar: " + (err.message || err), 3000);
+        } finally {
+          shutter.disabled = false;
+        }
+      }
+
+      // --- EXIF injection using piexifjs ---
+      async function injectEXIF(blob, meta) {
+        // piexifjs requires reading existing EXIF first, then merging
+        if (typeof piexif === "undefined") return blob; // library not loaded
+
+        try {
+          const dataUrl = await blobToDataURL(blob);
+          let exifObj;
+          try {
+            exifObj = piexif.load(dataUrl);
+          } catch (_) {
+            exifObj = { "0th": {}, Exif: {}, GPS: {}, "1st": {} };
+          }
+
+          const { yaw, pitch, targetYaw, targetPitch, shotIndex, camMeta } =
+            meta;
+
+          // ---- 0th IFD (basic image info) ----
+          const I = piexif.ImageIFD;
+          exifObj["0th"][I.Make] = exifObj["0th"][I.Make] || "Android";
+          exifObj["0th"][I.Software] = "MuniTrip 360 Capture";
+          exifObj["0th"][I.DateTime] = new Date()
+            .toISOString()
+            .replace("T", " ")
+            .substring(0, 19);
+          exifObj["0th"][I.ImageDescription] =
+            `360 capture: yaw=${yaw} pitch=${pitch} target=${targetYaw}/${targetPitch} shot=${shotIndex}/32`;
+
+          // ---- Exif IFD (camera settings) ----
+          const E = piexif.ExifIFD;
+          exifObj["Exif"][E.DateTimeOriginal] = exifObj["0th"][I.DateTime];
+          exifObj["Exif"][E.DateTimeDigitized] = exifObj["0th"][I.DateTime];
+          // UserComment: encode yaw/pitch/target as ASCII bytes
+          const comment = `YAW=${yaw};PITCH=${pitch};TYAW=${targetYaw};TPITCH=${targetPitch};SHOT=${shotIndex}`;
+          exifObj["Exif"][E.UserComment] = encodeExifAscii(comment);
+          // Camera intrinsics if available
+          if (camMeta.focalLength)
+            exifObj["Exif"][E.FocalLength] = [
+              Math.round(camMeta.focalLength * 100),
+              100,
+            ];
+          if (camMeta.focalLengthIn35mm)
+            exifObj["Exif"][E.FocalLengthIn35mmFilm] = Math.round(
+              camMeta.focalLengthIn35mm,
+            );
+          if (camMeta.iso) exifObj["Exif"][E.ISOSpeedRatings] = camMeta.iso;
+          if (camMeta.shutterSpeed && camMeta.shutterSpeed > 0) {
+            // shutterSpeed in seconds → APEX value
+            const apex = -Math.log2(camMeta.shutterSpeed);
+            exifObj["Exif"][E.ShutterSpeedValue] = [
+              Math.round(apex * 100),
+              100,
+            ];
+            exifObj["Exif"][E.ExposureTime] = [
+              1,
+              Math.round(1 / camMeta.shutterSpeed),
+            ];
+          }
+
+          // ---- GPS IFD ----
+          if (gpsCoords) {
+            const G = piexif.GPSIFD;
+            const { lat, lng, alt } = gpsCoords;
+            exifObj["GPS"][G.GPSLatitudeRef] = lat >= 0 ? "N" : "S";
+            exifObj["GPS"][G.GPSLatitude] = decimalToDMS(Math.abs(lat));
+            exifObj["GPS"][G.GPSLongitudeRef] = lng >= 0 ? "E" : "W";
+            exifObj["GPS"][G.GPSLongitude] = decimalToDMS(Math.abs(lng));
+            if (alt !== null && alt !== undefined) {
+              exifObj["GPS"][G.GPSAltitudeRef] = alt < 0 ? 1 : 0;
+              exifObj["GPS"][G.GPSAltitude] = [
+                Math.round(Math.abs(alt) * 100),
+                100,
+              ];
+            }
+            exifObj["GPS"][G.GPSDateStamp] = new Date()
+              .toISOString()
+              .substring(0, 10)
+              .replace(/-/g, ":");
+          }
+
+          const exifBytes = piexif.dump(exifObj);
+          const newDataUrl = piexif.insert(exifBytes, dataUrl);
+          return dataURLtoBlob(newDataUrl);
+        } catch (err) {
+          console.warn("EXIF injection failed, returning original blob:", err);
+          return blob;
+        }
+      }
+
+      // helpers
+      function blobToDataURL(blob) {
+        return new Promise((res, rej) => {
+          const r = new FileReader();
+          r.onload = () => res(r.result);
+          r.onerror = () => rej(new Error("FileReader failed"));
+          r.readAsDataURL(blob);
+        });
+      }
+
+      function dataURLtoBlob(dataURL) {
+        const [header, b64] = dataURL.split(",");
+        const mime = header.match(/:(.*?);/)[1];
+        const bin = atob(b64);
+        const arr = new Uint8Array(bin.length);
+        for (let i = 0; i < bin.length; i++) arr[i] = bin.charCodeAt(i);
+        return new Blob([arr], { type: mime });
+      }
+
+      function decimalToDMS(decimal) {
+        const d = Math.floor(decimal);
+        const mFull = (decimal - d) * 60;
+        const m = Math.floor(mFull);
+        const s = (mFull - m) * 60;
+        return [
+          [d, 1],
+          [m, 1],
+          [Math.round(s * 100), 100],
+        ];
+      }
+
+      function encodeExifAscii(str) {
+        // EXIF UserComment: 8-byte charset ID + ASCII bytes
+        const prefix = [65, 83, 67, 73, 73, 0, 0, 0]; // 'ASCII\0\0\0'
+        const bytes = [...prefix, ...str.split("").map((c) => c.charCodeAt(0))];
+        return bytes;
+      }
+
+      function showBanner(msg, duration = 4000) {
+        const b = document.getElementById("banner");
+        b.textContent = msg;
+        b.classList.add("show");
+        setTimeout(() => b.classList.remove("show"), duration);
       }
 
       function addThumb(blob) {
@@ -1036,6 +1356,8 @@
           width: rec.width,
           height: rec.height,
           timestamp: rec.timestamp,
+          camera: rec.camMeta || {},
+          gps: rec.gps || null,
         }));
         zip.file(
           "metadata.json",
