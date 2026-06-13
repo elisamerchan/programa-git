@@ -1,0 +1,945 @@
+<!doctype html>
+<html lang="es">
+  <head>
+    <meta charset="UTF-8" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1, viewport-fit=cover"
+    />
+    <title>360 MuniTrip Capture</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+    <style>
+      :root {
+        --ink: #1a1d1b;
+        --paper: #f7f5f0;
+        --signal: #ff5a1f;
+        --slate: #6b7280;
+        --ok: #2e8b57;
+      }
+      * {
+        box-sizing: border-box;
+        margin: 0;
+        padding: 0;
+      }
+      html,
+      body {
+        height: 100%;
+        overflow: hidden;
+      }
+      body {
+        font-family: "Space Grotesk", system-ui, sans-serif;
+        background: var(--ink);
+        color: var(--paper);
+        -webkit-tap-highlight-color: transparent;
+      }
+      #app {
+        position: relative;
+        width: 100vw;
+        height: 100vh;
+        display: flex;
+        flex-direction: column;
+      }
+
+      /* ---- start screen ---- */
+      #start {
+        position: absolute;
+        inset: 0;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        text-align: center;
+        padding: 32px;
+        gap: 24px;
+        background: radial-gradient(
+          circle at 50% 30%,
+          #2a2e2b 0%,
+          var(--ink) 70%
+        );
+        z-index: 50;
+      }
+      #start h1 {
+        font-size: clamp(28px, 8vw, 48px);
+        font-weight: 700;
+        letter-spacing: -0.02em;
+        line-height: 1.05;
+      }
+      #start h1 span {
+        color: var(--signal);
+      }
+      #start p {
+        color: var(--slate);
+        max-width: 38ch;
+        font-size: 15px;
+        line-height: 1.5;
+      }
+      .btn {
+        font-family: "Space Grotesk", sans-serif;
+        font-size: 16px;
+        font-weight: 600;
+        padding: 16px 36px;
+        background: var(--signal);
+        color: var(--ink);
+        border: none;
+        border-radius: 999px;
+        cursor: pointer;
+        transition:
+          transform 0.15s ease,
+          opacity 0.15s ease;
+      }
+      .btn:active {
+        transform: scale(0.96);
+      }
+      .btn.secondary {
+        background: transparent;
+        color: var(--paper);
+        border: 1px solid var(--slate);
+      }
+      .btn:disabled {
+        opacity: 0.4;
+        cursor: not-allowed;
+      }
+      #start-error {
+        color: var(--signal);
+        font-size: 13px;
+        min-height: 18px;
+      }
+
+      /* ---- camera view ---- */
+      #camview {
+        position: absolute;
+        inset: 0;
+        display: none;
+      }
+      #camview.active {
+        display: block;
+      }
+      video {
+        width: 100%;
+        height: 100%;
+        object-fit: cover;
+        display: block;
+        background: #000;
+      }
+
+      /* HUD */
+      .hud-top {
+        position: absolute;
+        top: 0;
+        left: 0;
+        right: 0;
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        padding: max(14px, env(safe-area-inset-top)) 18px 14px;
+        background: linear-gradient(
+          to bottom,
+          rgba(0, 0, 0, 0.55),
+          transparent
+        );
+        z-index: 10;
+      }
+      .progress-label {
+        font-family: "JetBrains Mono", monospace;
+        font-size: 13px;
+        letter-spacing: 0.05em;
+        color: var(--paper);
+      }
+      .progress-label b {
+        color: var(--signal);
+      }
+      .pitch-label {
+        font-family: "JetBrains Mono", monospace;
+        font-size: 11px;
+        color: var(--slate);
+        text-transform: uppercase;
+        letter-spacing: 0.08em;
+      }
+
+      /* Center reference crosshair: fixed in middle, shows where phone points */
+      .center-cross {
+        position: absolute;
+        top: 50%;
+        left: 50%;
+        width: 14px;
+        height: 14px;
+        transform: translate(-50%, -50%);
+        border: 2px solid rgba(255, 255, 255, 0.5);
+        border-radius: 50%;
+        pointer-events: none;
+        z-index: 6;
+      }
+      .center-cross::before,
+      .center-cross::after {
+        content: "";
+        position: absolute;
+        background: rgba(255, 255, 255, 0.5);
+      }
+      .center-cross::before {
+        width: 1px;
+        height: 8px;
+        left: 50%;
+        top: -10px;
+        transform: translateX(-50%);
+      }
+      .center-cross::after {
+        width: 8px;
+        height: 1px;
+        top: 50%;
+        left: -10px;
+        transform: translateY(-50%);
+      }
+
+      /* AR layer holding projected target markers */
+      .ar-layer {
+        position: absolute;
+        inset: 0;
+        overflow: hidden;
+        pointer-events: none;
+        z-index: 5;
+      }
+      .ar-marker {
+        position: absolute;
+        top: 0;
+        left: 0;
+        width: 64px;
+        height: 64px;
+        transform: translate(-50%, -50%);
+        border-radius: 50%;
+        border: 3px solid var(--signal);
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-family: "JetBrains Mono", monospace;
+        font-size: 11px;
+        font-weight: 600;
+        color: var(--paper);
+        background: rgba(0, 0, 0, 0.18);
+        opacity: 0.45;
+        transition:
+          border-color 0.15s ease,
+          box-shadow 0.15s ease,
+          opacity 0.12s ease,
+          width 0.15s ease,
+          height 0.15s ease;
+      }
+      .ar-marker::before {
+        content: "";
+        position: absolute;
+        width: 6px;
+        height: 6px;
+        background: var(--signal);
+        border-radius: 50%;
+        transition: background 0.15s ease;
+      }
+      .ar-marker.active {
+        opacity: 1;
+        width: 84px;
+        height: 84px;
+      }
+      .ar-marker.aligned {
+        border-color: var(--ok);
+        box-shadow: 0 0 0 6px rgba(46, 139, 87, 0.18);
+      }
+      .ar-marker.aligned::before {
+        background: var(--ok);
+      }
+      .ar-marker.done {
+        border-color: var(--ok);
+        border-style: dashed;
+        opacity: 0.35;
+      }
+      .ar-marker.done::before {
+        background: var(--ok);
+      }
+      .ar-marker .ar-label {
+        display: none;
+      }
+      .ar-marker.active .ar-label {
+        display: block;
+      }
+
+      /* off-screen directional hints */
+      .reticle-wrap {
+        position: absolute;
+        top: 0;
+        left: 0;
+        right: 0;
+        bottom: 0;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        pointer-events: none;
+        z-index: 7;
+      }
+
+      /* directional arrows around reticle */
+      .arrow {
+        position: absolute;
+        font-size: 36px;
+        color: var(--signal);
+        opacity: 0;
+        transition: opacity 0.15s ease;
+        text-shadow: 0 1px 6px rgba(0, 0, 0, 0.7);
+        font-weight: 700;
+      }
+      .arrow.show {
+        opacity: 0.95;
+      }
+      .arrow.up {
+        top: 90px;
+      }
+      .arrow.down {
+        bottom: 140px;
+      }
+      .arrow.left {
+        left: 18px;
+      }
+      .arrow.right {
+        right: 18px;
+      }
+
+      /* Bottom bar */
+      .hud-bottom {
+        position: absolute;
+        bottom: 0;
+        left: 0;
+        right: 0;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 14px;
+        padding: 18px 18px max(22px, env(safe-area-inset-bottom));
+        background: linear-gradient(to top, rgba(0, 0, 0, 0.6), transparent);
+        z-index: 10;
+      }
+      .readout {
+        display: flex;
+        gap: 18px;
+        font-family: "JetBrains Mono", monospace;
+        font-size: 12px;
+        color: var(--paper);
+        background: rgba(0, 0, 0, 0.35);
+        padding: 6px 14px;
+        border-radius: 999px;
+        backdrop-filter: blur(4px);
+      }
+      .readout .target {
+        color: var(--slate);
+      }
+      .readout .target b {
+        color: var(--paper);
+      }
+
+      .capture-row {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        gap: 28px;
+        width: 100%;
+      }
+      .shutter {
+        width: 74px;
+        height: 74px;
+        border-radius: 50%;
+        background: var(--paper);
+        border: 4px solid rgba(255, 255, 255, 0.25);
+        cursor: pointer;
+        transition:
+          transform 0.1s ease,
+          background 0.15s ease;
+      }
+      .shutter:active {
+        transform: scale(0.92);
+      }
+      .shutter.aligned {
+        background: var(--ok);
+      }
+      .shutter:disabled {
+        opacity: 0.3;
+      }
+
+      .icon-btn {
+        width: 46px;
+        height: 46px;
+        border-radius: 50%;
+        background: rgba(255, 255, 255, 0.08);
+        border: 1px solid rgba(255, 255, 255, 0.15);
+        color: var(--paper);
+        font-size: 18px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        cursor: pointer;
+      }
+
+      /* Toast / calibration banner */
+      .banner {
+        position: absolute;
+        top: max(60px, calc(env(safe-area-inset-top) + 56px));
+        left: 18px;
+        right: 18px;
+        background: rgba(255, 90, 31, 0.92);
+        color: #1a1d1b;
+        font-size: 13px;
+        font-weight: 600;
+        text-align: center;
+        padding: 10px 14px;
+        border-radius: 12px;
+        z-index: 15;
+        display: none;
+      }
+      .banner.show {
+        display: block;
+      }
+
+      /* ---- done screen ---- */
+      #done {
+        position: absolute;
+        inset: 0;
+        z-index: 40;
+        display: none;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        gap: 20px;
+        padding: 32px;
+        text-align: center;
+        background: var(--ink);
+      }
+      #done.show {
+        display: flex;
+      }
+      #done h2 {
+        font-size: 28px;
+        font-weight: 700;
+      }
+      #done p {
+        color: var(--slate);
+        font-size: 14px;
+        max-width: 40ch;
+        line-height: 1.5;
+      }
+      #done-progress {
+        font-family: "JetBrains Mono", monospace;
+        font-size: 13px;
+        color: var(--signal);
+      }
+
+      /* thumbnail strip */
+      .thumbs {
+        position: absolute;
+        bottom: 118px;
+        left: 0;
+        right: 0;
+        display: flex;
+        gap: 6px;
+        padding: 0 14px;
+        overflow-x: auto;
+        z-index: 9;
+      }
+      .thumb {
+        width: 38px;
+        height: 38px;
+        border-radius: 8px;
+        background: rgba(255, 255, 255, 0.08);
+        border: 1px solid rgba(255, 255, 255, 0.15);
+        object-fit: cover;
+        flex-shrink: 0;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="app">
+      <!-- START SCREEN -->
+      <div id="start">
+        <h1>Captura <span>360°</span><br />MuniTrip</h1>
+        <p>
+          Toma 32 fotos guiadas para construir una panorámica esférica. Todo se
+          procesa y guarda en tu dispositivo — nada se sube a ningún servidor.
+        </p>
+        <button class="btn" id="btn-start">Empezar captura</button>
+        <div id="start-error"></div>
+      </div>
+
+      <!-- CAMERA VIEW -->
+      <div id="camview">
+        <video id="video" autoplay playsinline muted></video>
+
+        <div class="hud-top">
+          <div class="progress-label">FOTO <b id="shot-index">01</b> / 32</div>
+          <div class="pitch-label" id="pitch-row-label">HORIZONTE</div>
+        </div>
+
+        <div class="banner" id="banner">
+          Calibra la brújula moviendo el teléfono en forma de ocho
+        </div>
+
+        <!-- center reference crosshair (where the phone is pointing) -->
+        <div class="center-cross" id="center-cross"></div>
+
+        <!-- AR marker layer: 3D target points projected onto camera view -->
+        <div class="ar-layer" id="ar-layer"></div>
+
+        <!-- off-screen direction arrows toward the active target -->
+        <div class="reticle-wrap">
+          <div class="arrow up" id="arrow-up">↑</div>
+          <div class="arrow down" id="arrow-down">↓</div>
+          <div class="arrow left" id="arrow-left">←</div>
+          <div class="arrow right" id="arrow-right">→</div>
+        </div>
+
+        <div class="thumbs" id="thumbs"></div>
+
+        <div class="hud-bottom">
+          <div class="readout">
+            <span>YAW <b id="cur-yaw">0.0°</b></span>
+            <span class="target">OBJ <b id="target-readout">0° / 0°</b></span>
+            <span>PITCH <b id="cur-pitch">0.0°</b></span>
+          </div>
+          <div class="capture-row">
+            <div class="icon-btn" id="btn-skip" title="Saltar punto">⤼</div>
+            <button class="shutter" id="btn-shutter"></button>
+            <div class="icon-btn" id="btn-finish" title="Finalizar">⏹</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- DONE SCREEN -->
+      <div id="done">
+        <h2>Captura completa</h2>
+        <div id="done-progress">32 / 32 fotos guardadas</div>
+        <p>
+          Descarga el archivo ZIP con las imágenes y
+          <code>metadata.json</code> (yaw, pitch, dimensiones y marca de tiempo
+          de cada foto).
+        </p>
+        <button class="btn" id="btn-export">Descargar ZIP</button>
+        <button class="btn secondary" id="btn-restart">Empezar de nuevo</button>
+      </div>
+    </div>
+
+    <script>
+      /* ====================== CONFIG: 32-point capture pattern ====================== */
+      const TARGETS = (() => {
+        const pts = [];
+        // pitch 0: 12 points every 30°
+        for (let i = 0; i < 12; i++)
+          pts.push({ yaw: i * 30, pitch: 0, label: "HORIZONTE" });
+        // pitch +45: 8 points every 45°
+        for (let i = 0; i < 8; i++)
+          pts.push({ yaw: i * 45, pitch: 45, label: "ARRIBA 45°" });
+        // pitch -45: 8 points every 45°
+        for (let i = 0; i < 8; i++)
+          pts.push({ yaw: i * 45, pitch: -45, label: "ABAJO 45°" });
+        // pitch +90: 2 points
+        pts.push({ yaw: 0, pitch: 90, label: "CENIT" });
+        pts.push({ yaw: 180, pitch: 90, label: "CENIT" });
+        // pitch -90: 2 points
+        pts.push({ yaw: 0, pitch: -90, label: "NADIR" });
+        pts.push({ yaw: 180, pitch: -90, label: "NADIR" });
+        return pts; // total = 32
+      })();
+
+      const TOLERANCE = 5; // degrees
+      let SMOOTH = 0.25; // smoothing factor
+
+      // Simulated camera field of view (degrees) used for AR projection
+      const FOV_H = 60; // horizontal FOV
+      const FOV_V = 45; // vertical FOV
+      const NEARBY_RANGE = 35; // degrees: how far around current point counts as "nearby"
+
+      /* ====================== STATE ====================== */
+      let stream, track, video;
+      let baseAlpha = null,
+        baseBeta = null;
+      let smYaw = 0,
+        smPitch = 0;
+      let currentIndex = 0;
+      let captures = []; // {fileName, yaw, pitch, width, height, timestamp, blob}
+      let db;
+
+      /* ====================== INDEXEDDB ====================== */
+      function openDB() {
+        return new Promise((resolve, reject) => {
+          const req = indexedDB.open("Photo360_MuniTrip", 1);
+          req.onupgradeneeded = (e) => {
+            const _db = e.target.result;
+            if (!_db.objectStoreNames.contains("captures")) {
+              _db.createObjectStore("captures", { keyPath: "fileName" });
+            }
+          };
+          req.onsuccess = (e) => {
+            db = e.target.result;
+            resolve(db);
+          };
+          req.onerror = (e) => reject(e);
+        });
+      }
+
+      function clearStore() {
+        return new Promise((resolve) => {
+          const tx = db.transaction("captures", "readwrite");
+          tx.objectStore("captures").clear();
+          tx.oncomplete = () => resolve();
+        });
+      }
+
+      function saveCapture(record) {
+        return new Promise((resolve, reject) => {
+          const tx = db.transaction("captures", "readwrite");
+          tx.objectStore("captures").put(record);
+          tx.oncomplete = () => resolve();
+          tx.onerror = (e) => reject(e);
+        });
+      }
+
+      function getAllCaptures() {
+        return new Promise((resolve) => {
+          const tx = db.transaction("captures", "readonly");
+          const store = tx.objectStore("captures");
+          store.getAll().onsuccess = (e) => resolve(e.target.result);
+        });
+      }
+
+      /* ====================== PERMISSIONS / SETUP ====================== */
+      const startErr = document.getElementById("start-error");
+
+      document
+        .getElementById("btn-start")
+        .addEventListener("click", async () => {
+          startErr.textContent = "";
+          document.getElementById("btn-start").disabled = true;
+          try {
+            await openDB();
+            await clearStore();
+            await requestOrientationPermission();
+            await startCamera();
+            initOrientationListener();
+            showCamera();
+          } catch (err) {
+            console.error(err);
+            startErr.textContent = "Error: " + (err.message || err);
+            document.getElementById("btn-start").disabled = false;
+          }
+        });
+
+      async function requestOrientationPermission() {
+        if (
+          typeof DeviceOrientationEvent !== "undefined" &&
+          typeof DeviceOrientationEvent.requestPermission === "function"
+        ) {
+          const res = await DeviceOrientationEvent.requestPermission();
+          if (res !== "granted") {
+            throw new Error("Permiso de orientación denegado");
+          }
+        }
+        // Android: no explicit permission needed
+      }
+
+      async function startCamera() {
+        if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+          throw new Error("Cámara no soportada en este navegador");
+        }
+        const constraints = {
+          audio: false,
+          video: {
+            facingMode: "environment",
+            width: { ideal: 4000 },
+            height: { ideal: 3000 },
+          },
+        };
+        stream = await navigator.mediaDevices.getUserMedia(constraints);
+        track = stream.getVideoTracks()[0];
+        video = document.getElementById("video");
+        video.srcObject = stream;
+        await video.play();
+      }
+
+      function showCamera() {
+        document.getElementById("start").style.display = "none";
+        document.getElementById("camview").classList.add("active");
+        updateTargetUI();
+      }
+
+      /* ====================== ORIENTATION ====================== */
+      let compassWarned = false;
+
+      function initOrientationListener() {
+        window.addEventListener("deviceorientation", onOrientation, true);
+        window.addEventListener("compassneedscalibration", () => {
+          if (compassWarned) return;
+          compassWarned = true;
+          const b = document.getElementById("banner");
+          b.classList.add("show");
+          setTimeout(() => b.classList.remove("show"), 4000);
+        });
+      }
+
+      function onOrientation(e) {
+        if (e.alpha === null) return;
+        if (baseAlpha === null) {
+          baseAlpha = e.alpha;
+          baseBeta = e.beta;
+        }
+        let yaw = (e.alpha - baseAlpha + 360) % 360;
+        let pitch = e.beta - baseBeta;
+
+        // smoothing (handle wraparound for yaw)
+        let diff = yaw - smYaw;
+        if (diff > 180) diff -= 360;
+        if (diff < -180) diff += 360;
+        smYaw = (smYaw + diff * SMOOTH + 360) % 360;
+        smPitch = smPitch + (pitch - smPitch) * SMOOTH;
+
+        updateReadout(smYaw, smPitch);
+        updateAlignment(smYaw, smPitch);
+      }
+
+      /* ====================== UI UPDATES ====================== */
+      const elShotIndex = document.getElementById("shot-index");
+      const elPitchLabel = document.getElementById("pitch-row-label");
+      const elCurYaw = document.getElementById("cur-yaw");
+      const elCurPitch = document.getElementById("cur-pitch");
+      const elTargetReadout = document.getElementById("target-readout");
+      const shutter = document.getElementById("btn-shutter");
+      const capturedIndices = new Set();
+      const arrows = {
+        up: document.getElementById("arrow-up"),
+        down: document.getElementById("arrow-down"),
+        left: document.getElementById("arrow-left"),
+        right: document.getElementById("arrow-right"),
+      };
+
+      function updateTargetUI() {
+        const t = TARGETS[currentIndex];
+        elShotIndex.textContent = String(currentIndex + 1).padStart(2, "0");
+        elPitchLabel.textContent = t.label;
+        elTargetReadout.textContent = `${t.yaw}° / ${t.pitch}°`;
+      }
+
+      function updateReadout(yaw, pitch) {
+        elCurYaw.textContent = yaw.toFixed(1) + "°";
+        elCurPitch.textContent = pitch.toFixed(1) + "°";
+      }
+
+      function angDiff(a, b) {
+        let d = ((((a - b) % 360) + 540) % 360) - 180; // shortest signed diff
+        return d;
+      }
+
+      function updateAlignment(yaw, pitch) {
+        const t = TARGETS[currentIndex];
+        const dYaw = angDiff(yaw, t.yaw);
+        const dPitch = pitch - t.pitch;
+        const aligned =
+          Math.abs(dYaw) < TOLERANCE && Math.abs(dPitch) < TOLERANCE;
+
+        shutter.classList.toggle("aligned", aligned);
+
+        // off-screen arrows: only show if active marker is outside the visible FOV
+        const outRight = dYaw > FOV_H / 2;
+        const outLeft = dYaw < -FOV_H / 2;
+        const outDown = dPitch > FOV_V / 2;
+        const outUp = dPitch < -FOV_V / 2;
+        arrows.right.classList.toggle("show", outRight);
+        arrows.left.classList.toggle("show", outLeft);
+        arrows.down.classList.toggle("show", outDown);
+        arrows.up.classList.toggle("show", outUp);
+
+        renderARMarkers(yaw, pitch, aligned);
+      }
+
+      /* ====================== AR MARKER PROJECTION ====================== */
+      const arLayer = document.getElementById("ar-layer");
+      const markerEls = {}; // index -> element
+
+      function getRelevantIndices() {
+        // active + done targets near current yaw + the next pending target
+        const indices = new Set();
+        indices.add(currentIndex);
+        if (currentIndex + 1 < TARGETS.length) indices.add(currentIndex + 1);
+        // include nearby done markers (same pitch row, close yaw) for context
+        const t = TARGETS[currentIndex];
+        TARGETS.forEach((pt, i) => {
+          if (i === currentIndex) return;
+          if (pt.pitch === t.pitch) {
+            const d = Math.abs(angDiff(pt.yaw, t.yaw));
+            if (d <= NEARBY_RANGE) indices.add(i);
+          }
+        });
+        return indices;
+      }
+
+      function renderARMarkers(yaw, pitch, aligned) {
+        const relevant = getRelevantIndices();
+        const w = window.innerWidth;
+        const h = window.innerHeight;
+
+        // remove markers no longer relevant
+        Object.keys(markerEls).forEach((k) => {
+          const idx = Number(k);
+          if (!relevant.has(idx)) {
+            markerEls[idx].remove();
+            delete markerEls[idx];
+          }
+        });
+
+        relevant.forEach((idx) => {
+          const pt = TARGETS[idx];
+          const dYaw = angDiff(pt.yaw, yaw);
+          const dPitch = pt.pitch - pitch;
+
+          // outside projection range -> skip (avoid extreme distortion at edges)
+          if (Math.abs(dYaw) > FOV_H * 0.9 || Math.abs(dPitch) > FOV_V * 0.9) {
+            if (markerEls[idx]) {
+              markerEls[idx].style.display = "none";
+            }
+            return;
+          }
+
+          const x = w / 2 + (dYaw / (FOV_H / 2)) * (w / 2);
+          const y = h / 2 + (dPitch / (FOV_V / 2)) * (h / 2);
+
+          let el = markerEls[idx];
+          if (!el) {
+            el = document.createElement("div");
+            el.className = "ar-marker";
+            el.innerHTML = '<span class="ar-label"></span>';
+            arLayer.appendChild(el);
+            markerEls[idx] = el;
+          }
+          el.style.display = "flex";
+          el.style.left = x + "px";
+          el.style.top = y + "px";
+
+          const isActive = idx === currentIndex;
+          const isDone = capturedIndices.has(idx);
+          el.classList.toggle("active", isActive);
+          el.classList.toggle("aligned", isActive && aligned);
+          el.classList.toggle("done", isDone && !isActive);
+
+          const label = el.querySelector(".ar-label");
+          label.textContent = `${pt.yaw}°/${pt.pitch}°`;
+        });
+      }
+
+      /* ====================== CAPTURE ====================== */
+      shutter.addEventListener("click", capturePhoto);
+      document.getElementById("btn-skip").addEventListener("click", () => {
+        advanceIndex();
+      });
+      document.getElementById("btn-finish").addEventListener("click", () => {
+        finishCapture();
+      });
+
+      async function capturePhoto() {
+        const t = TARGETS[currentIndex];
+        const canvas = document.createElement("canvas");
+        canvas.width = video.videoWidth;
+        canvas.height = video.videoHeight;
+        const ctx = canvas.getContext("2d");
+        ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+
+        const blob = await new Promise((res) =>
+          canvas.toBlob(res, "image/jpeg", 0.92),
+        );
+        const fileName = `photo_${String(currentIndex + 1).padStart(2, "0")}_yaw${t.yaw}_pitch${t.pitch}.jpg`;
+        const record = {
+          fileName,
+          yaw: Number(smYaw.toFixed(1)),
+          pitch: Number(smPitch.toFixed(1)),
+          targetYaw: t.yaw,
+          targetPitch: t.pitch,
+          width: canvas.width,
+          height: canvas.height,
+          timestamp: new Date().toISOString(),
+          blob,
+        };
+        await saveCapture(record);
+        capturedIndices.add(currentIndex);
+        addThumb(blob);
+        advanceIndex();
+      }
+
+      function addThumb(blob) {
+        const img = document.createElement("img");
+        img.className = "thumb";
+        img.src = URL.createObjectURL(blob);
+        document.getElementById("thumbs").appendChild(img);
+      }
+
+      function advanceIndex() {
+        if (currentIndex < TARGETS.length - 1) {
+          currentIndex++;
+          updateTargetUI();
+          renderARMarkers(smYaw, smPitch, false);
+        } else {
+          finishCapture();
+        }
+      }
+
+      /* ====================== FINISH / EXPORT ====================== */
+      async function finishCapture() {
+        const all = await getAllCaptures();
+        document.getElementById("done-progress").textContent =
+          `${all.length} / 32 fotos guardadas`;
+        document.getElementById("camview").classList.remove("active");
+        document.getElementById("done").classList.add("show");
+        if (stream) {
+          stream.getTracks().forEach((tr) => tr.stop());
+        }
+      }
+
+      document
+        .getElementById("btn-export")
+        .addEventListener("click", exportZip);
+      document.getElementById("btn-restart").addEventListener("click", () => {
+        location.reload();
+      });
+
+      async function exportZip() {
+        const btn = document.getElementById("btn-export");
+        btn.disabled = true;
+        btn.textContent = "Generando ZIP…";
+
+        const zip = new JSZip();
+        const all = await getAllCaptures();
+        for (const rec of all) {
+          zip.file(rec.fileName, rec.blob);
+        }
+        const metadata = all.map((rec) => ({
+          fileName: rec.fileName,
+          yaw: rec.yaw,
+          pitch: rec.pitch,
+          targetYaw: rec.targetYaw,
+          targetPitch: rec.targetPitch,
+          width: rec.width,
+          height: rec.height,
+          timestamp: rec.timestamp,
+        }));
+        zip.file(
+          "metadata.json",
+          JSON.stringify(
+            { captures: metadata, device: navigator.userAgent },
+            null,
+            2,
+          ),
+        );
+
+        const zipBlob = await zip.generateAsync({ type: "blob" });
+        const url = URL.createObjectURL(zipBlob);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = `captures_${Date.now()}.zip`;
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        URL.revokeObjectURL(url);
+
+        btn.disabled = false;
+        btn.textContent = "Descargar ZIP";
+      }
+    </script>
+  </body>
+</html>
