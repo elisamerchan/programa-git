@@ -1,0 +1,169 @@
+<!doctype html>
+<html lang="es">
+  <head>
+    <meta charset="UTF-8" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1.0, viewport-fit=cover, user-scalable=no"
+    />
+    <title>MuniTrip 360</title>
+
+    <link
+      rel="stylesheet"
+      href="https://cdn.jsdelivr.net/npm/@photo-sphere-viewer/core/index.css"
+    />
+
+    <style>
+      * {
+        box-sizing: border-box;
+      }
+
+      html,
+      body {
+        margin: 0;
+        padding: 0;
+        height: 100%;
+        width: 100%;
+        overflow: hidden;
+      }
+
+      body {
+        background: #111;
+        color: white;
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        -webkit-touch-callout: none;
+        -webkit-user-select: none;
+      }
+
+      .header {
+        padding: max(12px, env(safe-area-inset-top)) 15px 12px;
+        background: #1c1c1c;
+        border-bottom: 1px solid #333;
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        height: 60px;
+      }
+
+      input {
+        padding: 10px 14px;
+        background: #ff5a1f;
+        color: #1a1d1b;
+        border: none;
+        border-radius: 6px;
+        font-weight: 600;
+        cursor: pointer;
+        font-size: 14px;
+      }
+
+      input:active {
+        opacity: 0.9;
+      }
+
+      #fileInfo {
+        font-size: 12px;
+        color: #999;
+        margin-left: auto;
+      }
+
+      #viewer {
+        width: 100vw;
+        height: calc(100vh - 60px);
+        will-change: transform;
+        -webkit-user-select: none;
+        user-select: none;
+      }
+
+      /* Optimizaciones para mobile */
+      @supports (padding: max(0px)) {
+        body {
+          padding-top: env(safe-area-inset-top);
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <div class="header">
+      <input type="file" id="fileInput" accept="image/*" />
+      <div id="fileInfo"></div>
+    </div>
+
+    <div id="viewer"></div>
+
+    <script type="module">
+      import { Viewer } from "https://cdn.jsdelivr.net/npm/@photo-sphere-viewer/core/+esm";
+
+      let viewer = null;
+      let loadTimeout = null;
+
+      // Detectar mobile
+      const isMobile =
+        /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(
+          navigator.userAgent,
+        );
+
+      document.getElementById("fileInput").addEventListener("change", (e) => {
+        const file = e.target.files[0];
+        if (!file) return;
+
+        const fileInfo = document.getElementById("fileInfo");
+        const sizeMB = (file.size / (1024 * 1024)).toFixed(2);
+        fileInfo.textContent = `${sizeMB}MB`;
+
+        // Limpiar timeout anterior
+        if (loadTimeout) clearTimeout(loadTimeout);
+
+        const url = URL.createObjectURL(file);
+
+        // Destruir viewer anterior y esperar limpieza
+        if (viewer) {
+          viewer.destroy();
+          viewer = null;
+          loadTimeout = setTimeout(() => createViewer(url), 200);
+        } else {
+          createViewer(url);
+        }
+      });
+
+      function createViewer(url) {
+        // Usar requestIdleCallback para no bloquear UI
+        const loadFn = () => {
+          viewer = new Viewer({
+            container: document.getElementById("viewer"),
+            panorama: url,
+            defaultYaw: "0deg",
+            defaultPitch: "0deg",
+            mousewheel: true,
+            touchmoveTwoFingers: false,
+            navbar: ["zoom", "move", "fullscreen"],
+            autorotate: false,
+            showNavbar: true,
+            // Optimizar para mobile
+            ...(isMobile && {
+              resolution: 32,
+              defaultZoomLvl: 0,
+              transitionDuration: 250,
+            }),
+            // Desktop: más detalles
+            ...(!isMobile && {
+              resolution: 64,
+            }),
+          });
+
+          // Aplicar aceleración de hardware
+          const viewerEl = document.getElementById("viewer");
+          viewerEl.style.willChange = "transform";
+          if (isMobile) {
+            viewerEl.style.webkitOverflowScrolling = "touch";
+          }
+        };
+
+        if ("requestIdleCallback" in window) {
+          requestIdleCallback(loadFn, { timeout: 800 });
+        } else {
+          requestAnimationFrame(() => setTimeout(loadFn, 100));
+        }
+      }
+    </script>
+  </body>
+</html>
